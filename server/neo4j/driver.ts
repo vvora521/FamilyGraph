@@ -43,7 +43,7 @@ export async function runWrite<T = Record<string, unknown>>(
   const d = getDriver()
   const session = d.session({ defaultAccessMode: neo4j.session.WRITE })
   try {
-    const result = await session.writeTransaction((tx) => tx.run(cypher, params))
+    const result = await session.executeWrite((tx) => tx.run(cypher, params))
     return result.records.map((record) => record.toObject() as T)
   } finally {
     await session.close()

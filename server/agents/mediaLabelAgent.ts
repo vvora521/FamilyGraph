@@ -63,7 +63,7 @@ Return ONLY a JSON array of short label strings, e.g.: ["1950s", "outdoor", "3 p
 
   let labels: string[] = []
   try {
-    const match = content.text.match(/\[.*\]/s)
+    const match = content.text.match(/\[[\s\S]*\]/)
     if (match) labels = JSON.parse(match[0])
   } catch {
     labels = [content.text.slice(0, 200)]

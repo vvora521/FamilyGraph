@@ -1,28 +1,55 @@
-import { ChatAnthropic } from '@langchain/anthropic'
-import { tool } from '@langchain/core/tools'
-import { createReactAgent } from 'langchain/agents'
-import { z } from 'zod'
+import Anthropic from '@anthropic-ai/sdk'
 import { runQuery, runWrite } from '@/server/neo4j/driver'
 import { randomUUID } from 'crypto'
 import type { PersonNode } from '@/lib/types'
 
-const neo4jReadTool = tool(
-  async ({ cypher, params }) => {
-    const result = await runQuery(cypher, params ? JSON.parse(params) : {})
-    return JSON.stringify(result)
-  },
+type ToolInput = Record<string, string>
+
+const tools: Anthropic.Tool[] = [
   {
     name: 'neo4j_read',
     description: 'Run a read-only Cypher query against the Neo4j database',
-    schema: z.object({
-      cypher: z.string().describe('The Cypher query to run'),
-      params: z.string().optional().describe('JSON string of query parameters'),
-    }),
-  }
-)
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        cypher: { type: 'string', description: 'The Cypher query to run' },
+        params: { type: 'string', description: 'JSON string of query parameters' },
+      },
+      required: ['cypher'],
+    },
+  },
+  {
+    name: 'neo4j_write',
+    description: 'Propose a new node/relationship to be reviewed by admin',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        proposedData: { type: 'string', description: 'JSON string of the proposed data' },
+        personId: { type: 'string', description: 'The person ID this relates to' },
+      },
+      required: ['proposedData', 'personId'],
+    },
+  },
+  {
+    name: 'cloudinary_tag',
+    description: 'Update AI-generated labels on a Media node',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        mediaId: { type: 'string', description: 'The Media node ID' },
+        labels: { type: 'string', description: 'JSON array of label strings' },
+      },
+      required: ['mediaId', 'labels'],
+    },
+  },
+]
 
-const neo4jWriteTool = tool(
-  async ({ proposedData, personId }) => {
+async function executeTool(name: string, input: ToolInput): Promise<string> {
+  if (name === 'neo4j_read') {
+    const result = await runQuery(input.cypher, input.params ? JSON.parse(input.params) : {})
+    return JSON.stringify(result)
+  }
+  if (name === 'neo4j_write') {
     const id = randomUUID()
     const now = new Date().toISOString()
     await runWrite(
@@ -34,45 +61,23 @@ const neo4jWriteTool = tool(
         createdBy: $personId,
         createdAt: $createdAt
       })`,
-      { id, proposedData, personId, createdAt: now }
+      { id, proposedData: input.proposedData, personId: input.personId, createdAt: now }
     )
     return `Pending contribution created with id: ${id}`
-  },
-  {
-    name: 'neo4j_write',
-    description: 'Propose a new node/relationship to be reviewed by admin',
-    schema: z.object({
-      proposedData: z.string().describe('JSON string of the proposed data'),
-      personId: z.string().describe('The person ID this relates to'),
-    }),
   }
-)
-
-const cloudinaryTagTool = tool(
-  async ({ mediaId, labels }) => {
+  if (name === 'cloudinary_tag') {
     await runWrite(
       `MATCH (m:Media {id: $mediaId}) SET m.aiLabels = $labels, m.aiLabelStatus = 'complete'`,
-      { mediaId, labels: JSON.parse(labels) }
+      { mediaId: input.mediaId, labels: JSON.parse(input.labels) }
     )
-    return `Labels updated for media ${mediaId}`
-  },
-  {
-    name: 'cloudinary_tag',
-    description: 'Update AI-generated labels on a Media node',
-    schema: z.object({
-      mediaId: z.string().describe('The Media node ID'),
-      labels: z.string().describe('JSON array of label strings'),
-    }),
+    return `Labels updated for media ${input.mediaId}`
   }
-)
+  return `Unknown tool: ${name}`
+}
 
 export async function runResearchAgent(personId: string) {
-  const model = new ChatAnthropic({
-    model: 'claude-sonnet-4-20250514',
-    apiKey: process.env.ANTHROPIC_API_KEY,
-  })
+  const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 
-  // Get person data
   const persons = await runQuery<{ p: PersonNode }>(
     'MATCH (p:Person {id: $id}) RETURN p',
     { id: personId }
@@ -80,18 +85,41 @@ export async function runResearchAgent(personId: string) {
   const person = persons[0]?.p
   if (!person) throw new Error(`Person ${personId} not found`)
 
-  const agent = await createReactAgent({
-    llm: model,
-    tools: [neo4jReadTool, neo4jWriteTool, cloudinaryTagTool],
-  })
+  const systemPrompt = `You are a genealogy research assistant with tools to query and write to a Neo4j graph database.
+Use neo4j_read to check existing data, then neo4j_write to propose new historically relevant Event nodes for human review.`
 
-  const prompt = `You are a genealogy research assistant. 
-Given this person: Name: ${person.name}, Birth Date: ${person.birthDate ?? 'unknown'}, Birth Place: ${person.birthPlace ?? 'unknown'}
-Research their historical context using the neo4j_read tool to check existing data.
-Then use neo4j_write to propose new Event nodes that would be historically relevant to their life.
-For example, if they were born in 1890 in Germany and immigrated to America, propose migration events.
-Always research what was historically happening during their lifetime.`
+  const userPrompt = `Given this person: Name: ${person.name}, Birth Date: ${person.birthDate ?? 'unknown'}, Birth Place: ${person.birthPlace ?? 'unknown'}
+Research their historical context, check existing data, then propose new Event nodes that would be historically relevant to their life.`
 
-  const result = await agent.invoke({ messages: [{ role: 'user', content: prompt }] })
-  return result
+  const messages: Anthropic.MessageParam[] = [{ role: 'user', content: userPrompt }]
+
+  // Agentic loop: allow up to 10 tool-use iterations
+  for (let i = 0; i < 10; i++) {
+    const response = await client.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 4096,
+      system: systemPrompt,
+      tools,
+      messages,
+    })
+
+    if (response.stop_reason === 'end_turn') {
+      const textBlock = response.content.find((b) => b.type === 'text')
+      return textBlock && textBlock.type === 'text' ? textBlock.text : 'Research complete.'
+    }
+
+    if (response.stop_reason === 'tool_use') {
+      messages.push({ role: 'assistant', content: response.content })
+      const toolResults: Anthropic.ToolResultBlockParam[] = []
+      for (const block of response.content) {
+        if (block.type === 'tool_use') {
+          const result = await executeTool(block.name, block.input as ToolInput)
+          toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: result })
+        }
+      }
+      messages.push({ role: 'user', content: toolResults })
+    }
+  }
+
+  return 'Research agent reached max iterations.'
 }
