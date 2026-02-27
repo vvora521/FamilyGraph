@@ -27,7 +27,7 @@ export async function runQuery<T = Record<string, unknown>>(
   params: Record<string, unknown> = {}
 ): Promise<T[]> {
   const d = getDriver()
-  const session = d.session()
+  const session = d.session({ defaultAccessMode: neo4j.session.READ })
   try {
     const result = await session.run(cypher, params)
     return result.records.map((record) => record.toObject() as T)

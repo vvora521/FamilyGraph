@@ -10,7 +10,7 @@ export const eventsRouter = router({
       title: z.string().min(1),
       description: z.string().optional(),
       date: z.string().optional(),
-      eventType: z.string(),
+      eventType: z.string().min(1),
       personId: z.string().uuid().optional(),
       placeId: z.string().uuid().optional(),
     }))
