@@ -3,6 +3,8 @@ import './globals.css'
 import { ClerkProvider } from '@clerk/nextjs'
 import { TRPCProvider } from '@/components/providers/TRPCProvider'
 
+export const dynamic = 'force-dynamic'
+
 export const metadata: Metadata = {
   title: 'FamilyGraph',
   description: 'Knowledge Graph Family Tree Application',
