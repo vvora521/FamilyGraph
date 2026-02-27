@@ -8,12 +8,12 @@ type ToolInput = Record<string, string>
 const tools: Anthropic.Tool[] = [
   {
     name: 'neo4j_read',
-    description: 'Run a read-only Cypher query against the Neo4j database',
+    description: 'Run a read-only parameterized Cypher query against the Neo4j database. Use $param placeholders and supply values in the params field whenever the query includes variable values.',
     input_schema: {
       type: 'object' as const,
       properties: {
-        cypher: { type: 'string', description: 'The Cypher query to run' },
-        params: { type: 'string', description: 'JSON string of query parameters' },
+        cypher: { type: 'string', description: 'The Cypher query to run. Use $param placeholders for all variable values instead of inline string literals.' },
+        params: { type: 'string', description: 'JSON string of query parameters. Required when the query contains $param placeholders.' },
       },
       required: ['cypher'],
     },
@@ -46,7 +46,8 @@ const tools: Anthropic.Tool[] = [
 
 async function executeTool(name: string, input: ToolInput): Promise<string> {
   if (name === 'neo4j_read') {
-    const result = await runQuery(input.cypher, input.params ? JSON.parse(input.params) : {})
+    const params = input.params ? JSON.parse(input.params) : {}
+    const result = await runQuery(input.cypher, params)
     return JSON.stringify(result)
   }
   if (name === 'neo4j_write') {

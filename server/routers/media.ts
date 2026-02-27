@@ -14,7 +14,7 @@ cloudinary.config({
 export const mediaRouter = router({
   createMedia: contributorProcedure
     .input(z.object({
-      cloudinaryPublicId: z.string(),
+      cloudinaryPublicId: z.string().min(1),
       mediaType: z.enum(['image', 'video']),
       caption: z.string().optional(),
       takenAt: z.string().optional(),
